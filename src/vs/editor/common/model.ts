@@ -348,6 +348,13 @@ export interface InjectedTextOptions {
 	readonly inlineClassNameAffectsLetterSpacing?: boolean;
 
 	/**
+	 * Sets the atomic rendered width and wrapping width of this injected text in editor-font em units.
+	 * Cannot be combined with {@link tokens}.
+	 * @internal
+	 */
+	readonly widthInEm?: number;
+
+	/**
 	 * This field allows to attach data to this injected text.
 	 * The data can be read when injected texts at a given position are queried.
 	 */
