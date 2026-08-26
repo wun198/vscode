@@ -88,10 +88,10 @@ export function getSessionChatPillKindForAction(actionId: string): SessionChatPi
 
 /**
  * The row's rendered height, reserved below the transcript by its host because
- * the row floats over it. Derived from the row's `2px`/`6px` padding here plus a
+ * the row floats over it. Derived from the row's `2px`/`4px` padding here plus a
  * 22px `.monaco-text-button.small` pill; keep in sync if either changes.
  */
-export const SESSION_CHAT_INPUT_TOOLBAR_HEIGHT = 30;
+export const SESSION_CHAT_INPUT_TOOLBAR_HEIGHT = 28;
 
 /** A toolbar for session metadata, active-turn status, and background activity. */
 export class SessionChatInputToolbar extends Disposable {

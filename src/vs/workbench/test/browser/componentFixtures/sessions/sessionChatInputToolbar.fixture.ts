@@ -174,10 +174,15 @@ function renderPills(ctx: ComponentFixtureContext, sessionMock: IMockSessionAndC
 	container.style.backgroundColor = 'var(--vscode-sideBar-background)';
 }
 
-async function renderChatViewWithPills(ctx: ComponentFixtureContext, mock: IMockSessionAndChat, messages: IFixtureMessage[]): Promise<void> {
+async function renderChatViewWithPills(ctx: ComponentFixtureContext, mock: IMockSessionAndChat, messages: IFixtureMessage[], options?: { readonly height?: number; readonly scrollOffsetFromBottom?: number }): Promise<void> {
+	const scrollOffsetFromBottom = options?.scrollOffsetFromBottom;
 	await renderChatWidget(ctx, {
 		messages,
+		height: options?.height,
 		persistentContentHeight: SESSION_CHAT_INPUT_TOOLBAR_HEIGHT,
+		onRendered: scrollOffsetFromBottom
+			? handle => handle.listWidget.scrollTop = Math.max(0, handle.listWidget.scrollTop - scrollOffsetFromBottom)
+			: undefined,
 		decorateInputPart: (inputPart, instantiationService) => {
 			// The fixture's test configuration has no product defaults, so opt in
 			// explicitly to make sure the pills render.
@@ -204,6 +209,49 @@ const FULL_VIEW_MESSAGES: IFixtureMessage[] = [
 		assistant: [
 			{ kind: 'markdown', text: 'Added `index.html` with a minimal landing page and linked it from the README.' },
 		],
+	},
+];
+
+const FADE_VIEW_MESSAGES: IFixtureMessage[] = [
+	...FULL_VIEW_MESSAGES,
+	{
+		user: 'Add a responsive navigation bar',
+		assistant: [
+			{ kind: 'markdown', text: 'Implemented a responsive navigation bar with accessible labels and keyboard focus styles.' },
+		],
+	},
+	{
+		user: 'Verify the production build',
+		assistant: [
+			{ kind: 'markdown', text: 'The implementation is complete. The production build requires permission to run.' },
+			{ kind: 'terminalConfirmation', command: 'npm run build' },
+		],
+		responseComplete: false,
+	},
+];
+
+const STACKED_SURFACES_VIEW_MESSAGES: IFixtureMessage[] = [
+	{
+		user: 'Deploy the production build',
+		assistant: [
+			{ kind: 'markdown', text: 'Before deployment, I need a target and permission to run the build.' },
+			{
+				kind: 'questionCarousel',
+				message: 'Choose a deployment target',
+				questions: [{
+					id: 'target',
+					type: 'singleSelect',
+					title: 'Where should I deploy?',
+					allowFreeformInput: false,
+					options: [
+						{ id: 'staging', label: 'Staging', value: 'staging' },
+						{ id: 'production', label: 'Production', value: 'production' },
+					],
+				}],
+			},
+			{ kind: 'terminalConfirmation', command: 'npm run build' },
+		],
+		responseComplete: false,
 	},
 ];
 
@@ -420,6 +468,18 @@ export default defineThemedFixtureGroup({ path: 'sessions/' }, {
 		render: (ctx) => renderChatViewWithPills(ctx, createMockSession({
 			turnChanges: [createdFile('README.md', 20, 0, true), createdFile('index.html', 30, 4), editedFile('app.ts', 8, 3)],
 		}), FULL_VIEW_MESSAGES),
+	}),
+
+	SessionChatView_ArtifactPillAndPermission: defineComponentFixture({
+		render: (ctx) => renderChatViewWithPills(ctx, createMockSession({
+			artifacts: [{ id: 'a1', kind: SessionArtifactKind.File, label: 'Implementation plan', uri: URI.file('/repo/docs/plan.md') }],
+		}), FADE_VIEW_MESSAGES, { height: 400, scrollOffsetFromBottom: 16 }),
+	}),
+
+	SessionChatView_StackedInputSurfaces: defineComponentFixture({
+		render: (ctx) => renderChatViewWithPills(ctx, createMockSession({
+			artifacts: [{ id: 'a1', kind: SessionArtifactKind.File, label: 'Implementation plan', uri: URI.file('/repo/docs/plan.md') }],
+		}), STACKED_SURFACES_VIEW_MESSAGES, { height: 720 }),
 	}),
 
 	SessionChatView_ReadOnlyPills: defineComponentFixture({
