@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { IAgentServerToolHost } from '../../common/agentServerTools.js';
+import type { IAgentServerToolDefinition, IAgentServerToolHost } from '../../common/agentServerTools.js';
 import { ActionType } from '../../common/state/protocol/common/actions.js';
 import { parseRequiredSessionUriFromChatUri, type StringOrMarkdown, type ToolDefinition, type URI } from '../../common/state/sessionState.js';
 import type { AgentHostStateManager } from '../agentHostStateManager.js';
@@ -39,6 +39,7 @@ export interface IServerToolDisplay {
 export interface IServerToolExecutionContext {
 	readonly sessionUri: URI;
 	readonly chatUri: URI;
+	readonly turnId?: string;
 }
 
 /**
@@ -57,7 +58,16 @@ export interface IServerToolExecutionContext {
  */
 export interface IServerToolGroup {
 	/** Tool definitions this group advertises on the session's `serverTools`. */
-	readonly definitions: readonly ToolDefinition[];
+	readonly definitions: readonly IAgentServerToolDefinition[];
+	/**
+	 * Names this group's tools were previously advertised under, mapped to the
+	 * name that replaced them. A renamed tool has to keep answering to its old
+	 * name: restored history and prompts written against the old name would
+	 * otherwise fail to route and lose their dedicated display. Legacy names are
+	 * never advertised, and the host translates them before dispatching, so a
+	 * group only ever sees its current names.
+	 */
+	readonly legacyToolNames?: ReadonlyMap<string, string>;
 	/** Whether a contributed tool is currently enabled for advertisement and execution. */
 	isEnabled(toolName: string): boolean;
 	/**
@@ -116,7 +126,10 @@ export interface IServerToolGroup {
  */
 export class AgentServerToolHost implements IAgentServerToolHost {
 
+	/** Every name the host answers to — current and legacy — and its owning group. */
 	private readonly _groupByToolName = new Map<string, IServerToolGroup>();
+	/** Legacy names mapped to the current name that replaced them. */
+	private readonly _currentToolNames = new Map<string, string>();
 
 	constructor(
 		private readonly _stateManager: AgentHostStateManager,
@@ -130,10 +143,32 @@ export class AgentServerToolHost implements IAgentServerToolHost {
 				this._groupByToolName.set(def.name, group);
 			}
 		}
+		// Registered after every current name, so a legacy name can never shadow
+		// a tool that is actually advertised under it.
+		for (const group of this._groups) {
+			for (const [legacyName, currentName] of group.legacyToolNames ?? []) {
+				if (this._groupByToolName.has(legacyName)) {
+					continue;
+				}
+				this._groupByToolName.set(legacyName, group);
+				this._currentToolNames.set(legacyName, currentName);
+			}
+		}
 	}
 
-	get definitions(): readonly ToolDefinition[] {
+	/** The name a group knows a tool by, translating a legacy name if needed. */
+	private _currentToolName(toolName: string): string {
+		return this._currentToolNames.get(toolName) ?? toolName;
+	}
+
+	get definitions(): readonly IAgentServerToolDefinition[] {
 		return this._groups.flatMap(group => group.definitions.filter(definition => group.isEnabled(definition.name)));
+	}
+
+	getDefinitionsForSession(sessionUri: URI): readonly IAgentServerToolDefinition[] {
+		return this._stateManager.isEphemeralSession(sessionUri)
+			? this.definitions.filter(definition => definition.enabledForEphemeralSessions)
+			: this.definitions;
 	}
 
 	get toolNames(): readonly string[] {
@@ -147,22 +182,24 @@ export class AgentServerToolHost implements IAgentServerToolHost {
 		}
 		this._stateManager.dispatchServerAction(sessionUri, {
 			type: ActionType.SessionServerToolsChanged,
-			tools: [...this.definitions],
+			tools: this._toProtocolDefinitions(this.getDefinitionsForSession(sessionUri)),
 		});
 	}
 
 	canRequireConfirmation(toolName: string): boolean {
 		const group = this._groupByToolName.get(toolName);
-		return group?.isEnabled(toolName) === true && (group.canRequireConfirmation?.(toolName) ?? false);
+		const name = this._currentToolName(toolName);
+		return group?.isEnabled(name) === true && (group.canRequireConfirmation?.(name) ?? false);
 	}
 
 	requiresConfirmation(chatUri: URI, toolName: string): boolean {
 		const group = this._groupByToolName.get(toolName);
-		if (group && !this._isEnabledForSession(group, chatUri, toolName)) {
+		const name = this._currentToolName(toolName);
+		if (group && !this._isEnabledForSession(group, chatUri, name)) {
 			return false;
 		}
-		return group?.requiresConfirmation?.(this._stateManager, this._executionContext(chatUri), toolName)
-			?? group?.canRequireConfirmation?.(toolName)
+		return group?.requiresConfirmation?.(this._stateManager, this._executionContext(chatUri), name)
+			?? group?.canRequireConfirmation?.(name)
 			?? false;
 	}
 
@@ -171,17 +208,23 @@ export class AgentServerToolHost implements IAgentServerToolHost {
 		if (!group) {
 			throw new Error(`Unknown server tool: ${toolName}`);
 		}
-		if (!this._isEnabledForSession(group, chatUri, toolName)) {
+		const name = this._currentToolName(toolName);
+		if (!this._isEnabledForSession(group, chatUri, name)) {
 			throw new Error(`Server tool "${toolName}" is disabled.`);
 		}
-		return group.execute(this._stateManager, this._executionContext(chatUri), toolName, rawArgs);
+		return group.execute(this._stateManager, this._executionContext(chatUri), name, rawArgs);
 	}
 
 	private _executionContext(chatUri: URI): IServerToolExecutionContext {
 		return {
 			sessionUri: parseRequiredSessionUriFromChatUri(chatUri),
 			chatUri,
+			turnId: this._stateManager.getActiveTurnId(chatUri),
 		};
+	}
+
+	private _toProtocolDefinitions(definitions: readonly IAgentServerToolDefinition[]): ToolDefinition[] {
+		return definitions.map(({ enabledForEphemeralSessions: _enabledForEphemeralSessions, ...definition }) => definition);
 	}
 
 	private _isEnabledForSession(group: IServerToolGroup, chatUri: URI, toolName: string): boolean {
