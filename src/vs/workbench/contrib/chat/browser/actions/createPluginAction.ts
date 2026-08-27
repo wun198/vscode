@@ -13,6 +13,7 @@ import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { isUriComponents, URI } from '../../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../../platform/actions/common/actions.js';
+import { AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA } from '../../../../../platform/agentPlugins/common/agentPluginParser.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
@@ -321,19 +322,6 @@ export async function writePluginToDisk(
 	pluginName: string,
 	selected: readonly IResourceTreeItem[],
 ): Promise<void> {
-	await fileService.createFolder(pluginRoot);
-
-	// Create .plugin/plugin.json
-	const manifestDir = joinPath(pluginRoot, '.plugin');
-	await fileService.createFolder(manifestDir);
-	const manifest = {
-		name: pluginName,
-		version: '1.0.0',
-		description: '',
-	};
-	await fileService.writeFile(joinPath(manifestDir, 'plugin.json'), VSBuffer.fromString(JSON.stringify(manifest, null, '\t')));
-
-	// Group selected items by type
 	const byType = {
 		instruction: selected.filter(i => i.resourceType === 'instruction'),
 		prompt: selected.filter(i => i.resourceType === 'prompt'),
@@ -342,10 +330,28 @@ export async function writePluginToDisk(
 		hook: selected.filter(i => i.resourceType === 'hook'),
 		mcp: selected.filter(i => i.resourceType === 'mcp'),
 	};
+	const mcpServers: Record<string, object> = {};
+	for (const item of byType.mcp) {
+		if (item.mcpServer) {
+			const definition = item.mcpServer.definition;
+			mcpServers[definition.label] = serializeMcpLaunch(definition.launch, definition.label);
+		}
+	}
 
-	// Copy instructions → rules/
+	await fileService.createFolder(pluginRoot);
+
+	const manifest = {
+		$schema: AGENT_PLUGIN_SCHEMA,
+		name: pluginName,
+		version: '1.0.0',
+		description: '',
+	};
+	await fileService.writeFile(joinPath(pluginRoot, 'plugin.json'), VSBuffer.fromString(JSON.stringify(manifest, null, '\t')));
+
+	const copilotExtensionDir = joinPath(pluginRoot, 'com.github.copilot');
+
 	if (byType.instruction.length > 0) {
-		const rulesDir = joinPath(pluginRoot, 'rules');
+		const rulesDir = joinPath(copilotExtensionDir, 'rules');
 		await fileService.createFolder(rulesDir);
 		for (const item of byType.instruction) {
 			if (!item.promptPath) {
@@ -360,9 +366,8 @@ export async function writePluginToDisk(
 		}
 	}
 
-	// Copy prompts → commands/
 	if (byType.prompt.length > 0) {
-		const commandsDir = joinPath(pluginRoot, 'commands');
+		const commandsDir = joinPath(copilotExtensionDir, 'commands');
 		await fileService.createFolder(commandsDir);
 		for (const item of byType.prompt) {
 			if (!item.promptPath) {
@@ -375,9 +380,8 @@ export async function writePluginToDisk(
 		}
 	}
 
-	// Copy agents → agents/
 	if (byType.agent.length > 0) {
-		const agentsDir = joinPath(pluginRoot, 'agents');
+		const agentsDir = joinPath(copilotExtensionDir, 'agents');
 		await fileService.createFolder(agentsDir);
 		for (const item of byType.agent) {
 			if (!item.promptPath) {
@@ -411,9 +415,8 @@ export async function writePluginToDisk(
 		}
 	}
 
-	// Copy hooks → hooks/hooks.json (merge all selected hook files)
 	if (byType.hook.length > 0) {
-		const hooksDir = joinPath(pluginRoot, 'hooks');
+		const hooksDir = joinPath(copilotExtensionDir, 'hooks');
 		await fileService.createFolder(hooksDir);
 
 		const mergedHooks: Record<string, Record<string, unknown>[]> = {};
@@ -449,19 +452,10 @@ export async function writePluginToDisk(
 		);
 	}
 
-	// Export MCP servers → .mcp.json
-	if (byType.mcp.length > 0) {
-		const mcpServers: Record<string, object> = {};
-		for (const item of byType.mcp) {
-			if (!item.mcpServer) {
-				continue;
-			}
-			const def = item.mcpServer.definition;
-			mcpServers[def.label] = serializeMcpLaunch(def.launch);
-		}
-		const mcpJson = { mcpServers };
+	if (Object.keys(mcpServers).length > 0) {
+		const mcpJson = { $schema: AGENT_PLUGIN_MCP_SCHEMA, mcpServers };
 		await fileService.writeFile(
-			joinPath(pluginRoot, '.mcp.json'),
+			joinPath(pluginRoot, 'mcp.json'),
 			VSBuffer.fromString(JSON.stringify(mcpJson, null, '\t'))
 		);
 	}
@@ -493,8 +487,27 @@ export function serializeHookCommand(cmd: Record<string, unknown>): Record<strin
 	return result;
 }
 
-export function serializeMcpLaunch(launch: McpServerDefinition['launch']): object {
+export function serializeMcpLaunch(launch: McpServerDefinition['launch'], serverLabel = ''): object {
 	if (launch.type === McpServerTransportType.Stdio) {
+		if (!isPortableMcpCommand(launch.command)) {
+			throw new Error(localize('pluginMcpCommandNotPortable', "MCP server '{0}' cannot be exported because its command is not a bare executable name or a plugin-relative path.", serverLabel));
+		}
+		if (launch.cwd && !isPortableMcpWorkingDirectory(launch.cwd)) {
+			throw new Error(localize('pluginMcpCwdNotPortable', "MCP server '{0}' cannot be exported because its working directory is not plugin-relative.", serverLabel));
+		}
+		if (launch.envFile) {
+			throw new Error(localize('pluginMcpEnvFileNotPortable', "MCP server '{0}' cannot be exported because Agent Plugins do not support environment files.", serverLabel));
+		}
+		if (launch.sandbox) {
+			throw new Error(localize('pluginMcpSandboxNotPortable', "MCP server '{0}' cannot be exported because Agent Plugins do not support sandbox configuration.", serverLabel));
+		}
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(launch.env)) {
+			if (typeof value !== 'string' || key.toUpperCase() === 'PLUGIN_ROOT' || key.toUpperCase() === 'PLUGIN_DATA') {
+				throw new Error(localize('pluginMcpEnvNotPortable', "MCP server '{0}' cannot be exported because its environment contains values that Agent Plugins do not support.", serverLabel));
+			}
+			env[key] = value;
+		}
 		const result: Record<string, unknown> = {
 			type: 'stdio',
 			command: launch.command,
@@ -505,24 +518,89 @@ export function serializeMcpLaunch(launch: McpServerDefinition['launch']): objec
 		if (launch.cwd) {
 			result['cwd'] = launch.cwd;
 		}
-		if (Object.keys(launch.env).length > 0) {
-			result['env'] = { ...launch.env };
+		if (Object.keys(env).length > 0) {
+			result['env'] = env;
 		}
 		return result;
 	} else {
-		const result: Record<string, unknown> = {
-			type: 'http',
-			url: launch.uri.toString(),
-		};
 		if (launch.headers.length > 0) {
-			const headers: Record<string, string> = {};
-			for (const [key, value] of launch.headers) {
-				headers[key] = value;
-			}
-			result['headers'] = headers;
+			throw new Error(localize('pluginMcpHeadersNotPortable', "MCP server '{0}' cannot be exported because portable plugins cannot include HTTP headers.", serverLabel));
 		}
+		if (!isPortableMcpUrl(launch.uri)) {
+			throw new Error(localize('pluginMcpUrlNotPortable', "MCP server '{0}' cannot be exported because its URL is not a portable HTTP or HTTPS endpoint.", serverLabel));
+		}
+		const result: Record<string, unknown> = {
+			type: launch.transport ?? 'streamable-http',
+			url: launch.uri.toString(true),
+		};
 		return result;
 	}
+}
+
+function isPortableMcpCommand(command: string): boolean {
+	if (!command) {
+		return false;
+	}
+	return command.startsWith('./') ? command.length > 2 && isContainedRelativePath(command.slice(2)) : !/[\\/\s]/.test(command);
+}
+
+function isPortableMcpWorkingDirectory(cwd: string): boolean {
+	if (cwd.startsWith('./')) {
+		return isContainedRelativePath(cwd.slice(2));
+	}
+	for (const root of ['${PLUGIN_ROOT}', '${PLUGIN_DATA}']) {
+		if (cwd === root) {
+			return true;
+		}
+
+		if (cwd.startsWith(`${root}/`)) {
+			return isContainedRelativePath(cwd.slice(root.length + 1));
+		}
+	}
+	return false;
+}
+
+function isContainedRelativePath(path: string): boolean {
+	let depth = 0;
+	for (const segment of path.split('/')) {
+		if (!segment || segment === '.') {
+			continue;
+		}
+		if (segment === '..') {
+			if (depth === 0) {
+				return false;
+			}
+			depth--;
+		} else if (segment.includes('\\')) {
+			return false;
+		} else {
+			depth++;
+		}
+	}
+	return true;
+}
+
+function isPortableMcpUrl(uri: URI): boolean {
+	const value = uri.toString(true);
+	if (!URL.canParse(value)) {
+		return false;
+	}
+	const url = new URL(value);
+	if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname || url.username || url.password || url.hash) {
+		return false;
+	}
+	return url.protocol === 'https:' || isLoopbackHostname(url.hostname);
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+	const normalized = hostname.toLowerCase();
+	if (normalized === 'localhost' || normalized === '[::1]') {
+		return true;
+	}
+	const ipv4Segments = normalized.split('.');
+	return ipv4Segments.length === 4
+		&& ipv4Segments[0] === '127'
+		&& ipv4Segments.every(segment => /^\d{1,3}$/.test(segment) && Number(segment) <= 255);
 }
 
 export async function copyDirectory(fileService: IFileService, source: URI, target: URI): Promise<void> {
