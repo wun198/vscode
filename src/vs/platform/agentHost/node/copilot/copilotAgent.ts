@@ -57,7 +57,7 @@ import type { ErrorInfo } from '../../common/state/protocol/common/state.js';
 import { ProtectedResourceMetadata, type AgentSelection, type ChildCustomizationType, type ConfigPropertySchema, type ConfigSchema, type CustomizationEnablement, type ModelSelection, type ToolDefinition } from '../../common/state/protocol/state.js';
 import { ActionType, AuthRequiredReason, type AuthRequiredParams, type SessionAction } from '../../common/state/sessionActions.js';
 import { areAdditionalWorkingDirectoriesEqual } from '../../common/state/sessionWorkingDirectories.js';
-import { AgentCustomization, CustomizationLoadStatus, CustomizationType, RuleCustomization, ChatInputResponseKind, SkillCustomization, customizationId, buildChatUri, buildDefaultChatUri, AH_META_WORKSPACELESS_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, AH_META_IS_READ_DB_KEY, isDefaultChatUri, withSessionEhcliAdoptable, type ChildCustomization, type ClientPluginCustomization, type Customization, type DirectoryCustomization, type HookCustomization, type ISessionFolderPickerDecision, type MessageAttachment, type PendingMessage, type PluginCustomization, type PolicyState, type ChatInputAnswer, type ToolCallResult, type Turn, type UsageInfo } from '../../common/state/sessionState.js';
+import { AgentCustomization, CustomizationLoadStatus, CustomizationType, RuleCustomization, ChatInputResponseKind, SkillCustomization, customizationId, buildChatUri, buildDefaultChatUri, AH_META_WORKSPACELESS_DB_KEY, AH_META_IS_ARCHIVED_DB_KEY, AH_META_EHCLI_ADOPTED_DB_KEY, isDefaultChatUri, withSessionEhcliAdoptable, type ChildCustomization, type ClientPluginCustomization, type Customization, type DirectoryCustomization, type HookCustomization, type ISessionFolderPickerDecision, type MessageAttachment, type PendingMessage, type PluginCustomization, type PolicyState, type ChatInputAnswer, type ToolCallResult, type Turn, type UsageInfo } from '../../common/state/sessionState.js';
 import { getByokLmAgentModelId, resolveByokLmEnablement } from '../../common/agentHostByokLm.js';
 import { isCustomizationEnabled } from '../../common/customizationEnablement.js';
 import { ActiveClientToolSet, structuralToolsEqual } from '../activeClientState.js';
@@ -3416,10 +3416,16 @@ export class CopilotAgent extends Disposable implements IAgent {
 			// `isolation: 'folder'` keeps the session in place in the reused cwd —
 			// a git repo would otherwise default to worktree and show a spurious
 			// "Creating worktree…".
-			await this._storeSessionMetadata(session, undefined, workingDirectory, [workingDirectory], workingDirectory, project, project !== undefined, { [SessionConfigKey.Isolation]: 'folder' }, customTitle, /* markRead */ true, archived, /* ehcliAdopted */ true);
+			await this._storeSessionMetadata(session, undefined, workingDirectory, [workingDirectory], workingDirectory, project, project !== undefined, { [SessionConfigKey.Isolation]: 'folder' }, archived, /* ehcliAdopted */ true);
 			await this._adoptLegacyTurnUsage(session, sessionId);
+			// The host owns list-visible state (title / read): report it back so it
+			// lands in the session catalog and the per-session database together,
+			// instead of writing a half of it here.
+			const listVisible = customTitle !== undefined
+				? { title: customTitle, titleSource: 'user' as const, isRead: true }
+				: { isRead: true };
 			this._logService.info(`[Copilot] Adopted legacy session ${sessionId}: project=${project ? project.uri.fsPath : '(unresolved)'} archived=${archived} customTitle=${customTitle !== undefined} worktreeBridged=${!!adoptedWorktree}`);
-			return { adopted: true, eligible: true, reason: 'adopted', ...(adoptedWorktree ? { worktree: adoptedWorktree } : {}) };
+			return { adopted: true, eligible: true, reason: 'adopted', listVisible, ...(adoptedWorktree ? { worktree: adoptedWorktree } : {}) };
 		});
 	}
 
@@ -5014,17 +5020,13 @@ export class CopilotAgent extends Disposable implements IAgent {
 	}
 
 
-	private async _storeSessionMetadata(session: URI, model: ModelSelection | undefined, workingDirectory: URI | undefined, workingDirectories: readonly URI[] | undefined, customizationDirectory: URI | undefined, project: IAgentSessionProjectInfo | undefined, projectResolved = project !== undefined, configValues?: Record<string, unknown>, customTitle?: string, markRead?: boolean, archived?: boolean, ehcliAdopted?: boolean): Promise<void> {
+	private async _storeSessionMetadata(session: URI, model: ModelSelection | undefined, workingDirectory: URI | undefined, workingDirectories: readonly URI[] | undefined, customizationDirectory: URI | undefined, project: IAgentSessionProjectInfo | undefined, projectResolved = project !== undefined, configValues?: Record<string, unknown>, archived?: boolean, ehcliAdopted?: boolean): Promise<void> {
 		const dbRef = this._sessionDataService.openDatabase(session);
 		const db = dbRef.object;
 		try {
 			const work: Promise<void>[] = [];
 			if (model) {
 				work.push(db.setMetadata(CopilotAgent._META_MODEL, this._serializeModelSelection(model)));
-			}
-			// Persist read ownership so the adopted session isn't reported unread on open.
-			if (markRead) {
-				work.push(db.setMetadata(AH_META_IS_READ_DB_KEY, 'true'));
 			}
 			// Archiving is user-curated state; losing it on adoption would resurface
 			// everything the user filed away in the extension host list.
@@ -5062,12 +5064,6 @@ export class CopilotAgent extends Disposable implements IAgent {
 			// folder isolation) — folded into this write to avoid a second DB open.
 			if (configValues) {
 				work.push(db.setMetadata('configValues', JSON.stringify(configValues)));
-			}
-			// Overlaid as the session's display title on restore (see the
-			// `customTitle` overlay in `AgentService`); used by adopt to carry
-			// over the legacy extension-host session name.
-			if (customTitle) {
-				work.push(db.setMetadata('customTitle', customTitle));
 			}
 			await Promise.all(work);
 		} finally {

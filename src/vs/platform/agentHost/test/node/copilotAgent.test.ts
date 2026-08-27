@@ -11849,7 +11849,7 @@ suite('CopilotAgent', () => {
 
 				assert.deepStrictEqual(
 					{ first, second, configValues },
-					{ first: { adopted: true, eligible: true, reason: 'adopted' }, second: { adopted: false, eligible: false, native: true, reason: 'alreadyNative' }, configValues: JSON.stringify({ [SessionConfigKey.Isolation]: 'folder' }) },
+					{ first: { adopted: true, eligible: true, reason: 'adopted', listVisible: { isRead: true } }, second: { adopted: false, eligible: false, native: true, reason: 'alreadyNative' }, configValues: JSON.stringify({ [SessionConfigKey.Isolation]: 'folder' }) },
 				);
 			} finally {
 				await fs.rm(userHome.fsPath, { recursive: true, force: true });
@@ -11912,7 +11912,7 @@ suite('CopilotAgent', () => {
 
 				assert.deepStrictEqual(
 					{ adopted, archived },
-					{ adopted: { adopted: true, eligible: true, reason: 'adopted' }, archived: 'true' },
+					{ adopted: { adopted: true, eligible: true, reason: 'adopted', listVisible: { isRead: true } }, archived: 'true' },
 				);
 			} finally {
 				await fs.rm(userHome.fsPath, { recursive: true, force: true });
@@ -11950,7 +11950,7 @@ suite('CopilotAgent', () => {
 				assert.deepStrictEqual(
 					{ adopted, usages },
 					{
-						adopted: { adopted: true, eligible: true, reason: 'adopted' },
+						adopted: { adopted: true, eligible: true, reason: 'adopted', listVisible: { isRead: true } },
 						usages: [
 							['evt-1', JSON.stringify({ model: 'gpt-5.4', _meta: { copilotUsage: { totalNanoAiu: 1_500_000_000 } } })],
 							['evt-2', JSON.stringify({ model: 'gpt-5.4-mini', _meta: { copilotUsage: { totalNanoAiu: 0 } } })],
@@ -11984,7 +11984,17 @@ suite('CopilotAgent', () => {
 
 				assert.deepStrictEqual(
 					{ adopted, customTitle },
-					{ adopted: { adopted: true, eligible: true, reason: 'adopted' }, customTitle: 'My Legacy Session' },
+					{
+						adopted: {
+							adopted: true,
+							eligible: true,
+							reason: 'adopted',
+							// The host owns the list-visible title; the agent
+							// reports it instead of writing `customTitle` itself.
+							listVisible: { title: 'My Legacy Session', titleSource: 'user', isRead: true },
+						},
+						customTitle: undefined,
+					},
 				);
 			} finally {
 				await fs.rm(userHome.fsPath, { recursive: true, force: true });
@@ -12013,7 +12023,8 @@ suite('CopilotAgent', () => {
 
 				assert.deepStrictEqual(
 					{ adopted, isRead },
-					{ adopted: { adopted: true, eligible: true, reason: 'adopted' }, isRead: 'true' },
+					// The host owns the read marker; the agent reports it instead of writing it.
+					{ adopted: { adopted: true, eligible: true, reason: 'adopted', listVisible: { isRead: true } }, isRead: undefined },
 				);
 			} finally {
 				await fs.rm(userHome.fsPath, { recursive: true, force: true });
@@ -12092,7 +12103,7 @@ suite('CopilotAgent', () => {
 
 				const adopted = await ensureDefaultChatAdopted(agent, session);
 
-				assert.deepStrictEqual(adopted, { adopted: true, eligible: true, reason: 'adopted' });
+				assert.deepStrictEqual(adopted, { adopted: true, eligible: true, reason: 'adopted', listVisible: { isRead: true } });
 			} finally {
 				await fs.rm(userHome.fsPath, { recursive: true, force: true });
 				await fs.rm(workingDirectory, { recursive: true, force: true });
