@@ -13,6 +13,7 @@ import { CancellationToken } from 'vscode-languageserver-protocol';
 import { IAuthenticationService } from '../../../../../platform/authentication/common/authentication';
 import { NullChatDebugFileLoggerService } from '../../../../../platform/chat/common/chatDebugFileLoggerService';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configurationService';
+import { InMemoryConfigurationService } from '../../../../../platform/configuration/test/common/inMemoryConfigurationService';
 import { IVSCodeExtensionContext } from '../../../../../platform/extContext/common/extensionContext';
 import { MockFileSystemService } from '../../../../../platform/filesystem/node/test/mockFileSystemService';
 import { FileType } from '../../../../../platform/filesystem/common/fileTypes';
@@ -725,6 +726,33 @@ describe('CopilotCLISessionService', () => {
 				readDirectoryCallCount: 1,
 				statCallCount: 0,
 			});
+		});
+
+		it('stands down for non-archived legacy sessions when migration is enabled, keeping archived ones', async () => {
+			await (configurationService as InMemoryConfigurationService).setNonExtensionConfig('chat.agentSessions.migrateLegacyCopilotCli', true);
+			const fileSystem = new MockFileSystemService();
+			fileSystem.mockDirectory(URI.file('/workspace/project'), []);
+			const migrateService = disposables.add(createSessionService({ fileSystem }));
+			const migrateManager = await migrateService.getSessionManager() as unknown as MockCliSdkSessionManager;
+
+			for (const id of ['legacy-active', 'legacy-archived', 'legacy-orphaned']) {
+				const sdkSession = new MockCliSdkSession(id, new Date(0));
+				sdkSession.clientName = 'vscode';
+				sdkSession.summary = id;
+				migrateManager.sessions.set(id, sdkSession);
+			}
+			// Only a session with a resumable target (an existing cwd) is surfaced by the
+			// agent host; `legacy-orphaned` has a working directory that no longer exists.
+			migrateManager.sessions.get('legacy-active')!.context = { cwd: URI.file('/workspace/project').fsPath };
+			migrateManager.sessions.get('legacy-orphaned')!.context = { cwd: URI.file('/workspace/gone').fsPath };
+			await metadataStore.setSessionArchived('legacy-archived', true);
+
+			const result = await migrateService.getAllSessions(CancellationToken.None);
+
+			// Non-archived legacy with a resumable target stands down (agent host surfaces it);
+			// archived legacy stays, and an orphaned legacy (dead working directory) stays so it
+			// is never absent from both lists.
+			expect(result.map(item => item.id).sort()).toEqual(['legacy-archived', 'legacy-orphaned']);
 		});
 
 		it('does not list sessions created outside VS Code, even once loaded into memory', async () => {
