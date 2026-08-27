@@ -384,6 +384,24 @@ suite('QuickInput', () => { // https://github.com/microsoft/vscode/issues/147543
 		assert.strictEqual(quickpick.activeItems.length, 0);
 	});
 
+	test('automation id is exposed as DOM metadata and cleared when absent', () => {
+		const quickpick = store.add(controller.createQuickPick());
+		quickpick.items = [{ uiAutomationId: 'automation-id', label: 'item with automation id' }];
+		quickpick.show();
+
+		const entry = fixture.querySelector<HTMLElement>('.quick-input-list-entry')!;
+		const automationId = entry.getAttribute('data-quick-input-automation-id');
+
+		quickpick.items = [{ id: 'item-id', label: 'non-command item' }];
+		const recycledEntry = fixture.querySelector<HTMLElement>('.quick-input-list-entry')!;
+		const recycledAutomationId = recycledEntry.getAttribute('data-quick-input-automation-id');
+
+		assert.deepStrictEqual({ automationId, recycledAutomationId }, {
+			automationId: 'automation-id',
+			recycledAutomationId: null
+		});
+	});
+
 	test('isKeyModified - returns false when no modifiers are pressed', () => {
 		assert.strictEqual(isKeyModified(NO_KEY_MODS), false);
 		assert.strictEqual(isKeyModified({ ctrlCmd: false, alt: false, shift: false }), false);

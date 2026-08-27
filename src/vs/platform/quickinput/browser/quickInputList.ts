@@ -472,6 +472,11 @@ class QuickPickItemElementRenderer extends BaseQuickInputListRenderer<QuickPickI
 		const mainItem: IQuickPickItem = element.item;
 
 		element.element.classList.toggle('not-pickable', element.item.pickable === false);
+		if (typeof mainItem.uiAutomationId === 'string') {
+			data.entry.setAttribute('data-quick-input-automation-id', mainItem.uiAutomationId);
+		} else {
+			data.entry.removeAttribute('data-quick-input-automation-id');
+		}
 
 		this.ensureCheckbox(element, data);
 
