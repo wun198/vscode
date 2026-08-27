@@ -218,6 +218,7 @@ describe('mapChatFetcherErrorToNoNextEditReason', () => {
 		{ type: ChatFetchResponseType.AgentUnauthorized, ...baseRequestFields, authorizationUrl: '' },
 		{ type: ChatFetchResponseType.AgentFailedDependency, ...baseRequestFields },
 		{ type: ChatFetchResponseType.InvalidStatefulMarker, ...baseRequestFields },
+		{ type: ChatFetchResponseType.Failed, ...baseRequestFields },
 	] satisfies ReadonlyArray<Parameters<typeof mapChatFetcherErrorToNoNextEditReason>[0]>)('maps $type to Uncategorized', (error) => {
 		const result = mapChatFetcherErrorToNoNextEditReason(error);
 		expect(result).toBeInstanceOf(NoNextEditReason.Uncategorized);
@@ -226,7 +227,6 @@ describe('mapChatFetcherErrorToNoNextEditReason', () => {
 	it.each([
 		{ type: ChatFetchResponseType.BadRequest, ...baseRequestFields },
 		{ type: ChatFetchResponseType.NotFound, ...baseRequestFields },
-		{ type: ChatFetchResponseType.Failed, ...baseRequestFields },
 		{ type: ChatFetchResponseType.NetworkError, ...baseRequestFields },
 		{ type: ChatFetchResponseType.Unknown, ...baseRequestFields },
 	] satisfies ReadonlyArray<Parameters<typeof mapChatFetcherErrorToNoNextEditReason>[0]>)('maps $type to FetchFailure', (error) => {
