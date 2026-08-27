@@ -11,7 +11,7 @@ import { PreviousEditCodeStep } from '../../../intents/node/editCodeStep';
 import { IResultMetadata } from '../../../prompt/common/conversation';
 import { WorkingSetEntryState } from '../../../prompt/common/intents';
 import { ToolName } from '../../../tools/common/toolNames';
-import { arePromptsSimilar, didLastTestRunFail, isChatRecoveryAttempt, wasLastPlanReviewRejected } from '../chatRecovery';
+import { arePromptsSimilar, didLastTestRunFail, getChatRecoveryAttemptScore, wasLastPlanReviewRejected } from '../chatRecovery';
 
 const changedTestFile = URI.file('/workspace/new.test.ts');
 
@@ -127,10 +127,11 @@ suite('Chat recovery', () => {
 	test('requires the normalized recovery score to reach the threshold', () => {
 		const previousRequest = { prompt: 'previous request', modelId: 'model' } as ChatRequestTurn2;
 		expect([
-			isChatRecoveryAttempt(previousRequest, undefined, chatRequest({ attempt: 1 })),
-			isChatRecoveryAttempt(previousRequest, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
-			isChatRecoveryAttempt({ ...previousRequest, modelId: 'other-model' }, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
-		]).toEqual([false, false, true]);
+			getChatRecoveryAttemptScore(previousRequest, undefined, chatRequest({ attempt: 1 })),
+			getChatRecoveryAttemptScore(previousRequest, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
+			getChatRecoveryAttemptScore({ ...previousRequest, modelId: 'other-model' }, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
+			getChatRecoveryAttemptScore({ ...previousRequest, permissionLevel: 'autopilot' }, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
+		]).toEqual([false, false, true, true]);
 	});
 
 	test('excludes requests that are not user-driven recovery attempts', () => {
@@ -138,10 +139,10 @@ suite('Chat recovery', () => {
 		const previousResponse = chatResponse(undefined, true);
 
 		expect({
-			noHistory: isChatRecoveryAttempt(undefined, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
-			autopilot: isChatRecoveryAttempt(previousRequest, previousResponse, chatRequest({ attempt: 1, permissionLevel: 'autopilot' })),
-			subagent: isChatRecoveryAttempt(previousRequest, previousResponse, chatRequest({ attempt: 1, subAgentInvocationId: 'subagent-id' })),
-			systemInitiated: isChatRecoveryAttempt(previousRequest, previousResponse, chatRequest({ attempt: 1, isSystemInitiated: true })),
+			noHistory: getChatRecoveryAttemptScore(undefined, undefined, chatRequest({ attempt: 1, editedRequestId: 'request-id' })),
+			autopilot: getChatRecoveryAttemptScore(previousRequest, previousResponse, chatRequest({ attempt: 1, permissionLevel: 'autopilot' })),
+			subagent: getChatRecoveryAttemptScore(previousRequest, previousResponse, chatRequest({ attempt: 1, subAgentInvocationId: 'subagent-id' })),
+			systemInitiated: getChatRecoveryAttemptScore(previousRequest, previousResponse, chatRequest({ attempt: 1, isSystemInitiated: true })),
 		}).toEqual({
 			noHistory: false,
 			autopilot: false,
@@ -156,15 +157,17 @@ suite('Chat recovery', () => {
 		const noWorkspaceSignals = { getDiagnostics: () => [], textDocuments: [] };
 
 		expect({
-			editedRequest: isChatRecoveryAttempt({ ...previousRequest, modelId: 'other-model' }, undefined, chatRequest({ ...retry, editedRequestId: 'request-id' })),
-			changedModel: isChatRecoveryAttempt({ ...previousRequest, modelId: 'other-model' }, undefined, chatRequest({ ...retry, editedRequestId: 'request-id' })),
-			repeatedRequest: isChatRecoveryAttempt(previousRequest, undefined, chatRequest({ ...retry, prompt: 'Fix  the parser error', editedRequestId: 'request-id' })),
-			responseError: isChatRecoveryAttempt(previousRequest, chatResponse(undefined, true), chatRequest(retry)),
-			failedTests: isChatRecoveryAttempt(previousRequest, chatResponse(metadataWithChangedFile(changedTestFile, metadataWithTestRuns({ failedCount: 1 }))), chatRequest(retry), noWorkspaceSignals),
-			rejectedPlan: isChatRecoveryAttempt(previousRequest, chatResponse(metadataWithPlanReviews('{"rejected":true}')), chatRequest(retry)),
+			editedRequest: getChatRecoveryAttemptScore({ ...previousRequest, modelId: 'other-model' }, undefined, chatRequest({ ...retry, editedRequestId: 'request-id' })),
+			changedModel: getChatRecoveryAttemptScore({ ...previousRequest, modelId: 'other-model' }, undefined, chatRequest({ ...retry, editedRequestId: 'request-id' })),
+			turnedOffAutopilot: getChatRecoveryAttemptScore({ ...previousRequest, permissionLevel: 'autopilot' }, undefined, chatRequest({ ...retry, editedRequestId: 'request-id' })),
+			repeatedRequest: getChatRecoveryAttemptScore(previousRequest, undefined, chatRequest({ ...retry, prompt: 'Fix  the parser error', editedRequestId: 'request-id' })),
+			responseError: getChatRecoveryAttemptScore(previousRequest, chatResponse(undefined, true), chatRequest(retry)),
+			failedTests: getChatRecoveryAttemptScore(previousRequest, chatResponse(metadataWithChangedFile(changedTestFile, metadataWithTestRuns({ failedCount: 1 }))), chatRequest(retry), noWorkspaceSignals),
+			rejectedPlan: getChatRecoveryAttemptScore(previousRequest, chatResponse(metadataWithPlanReviews('{"rejected":true}')), chatRequest(retry)),
 		}).toEqual({
 			editedRequest: true,
 			changedModel: true,
+			turnedOffAutopilot: true,
 			repeatedRequest: true,
 			responseError: true,
 			failedTests: true,
@@ -184,10 +187,10 @@ suite('Chat recovery', () => {
 		const previousRequest = { prompt: 'previous request', modelId: 'model' } as ChatRequestTurn2;
 
 		expect({
-			userRejected: isChatRecoveryAttempt(previousRequest, chatResponse(metadataWithChangedFile(changedDocument.uri)), chatRequest({ attempt: 1, editedFileEvents: [{ uri: changedDocument.uri, eventKind: ChatRequestEditedFileEventKind.Undo }] }), noWorkspaceSignals),
-			userModified: isChatRecoveryAttempt(previousRequest, chatResponse(metadataWithChangedFile(changedDocument.uri)), chatRequest({ attempt: 1, editedRequestId: 'request-id', editedFileEvents: [{ uri: changedDocument.uri, eventKind: ChatRequestEditedFileEventKind.UserModification }] }), noWorkspaceSignals),
-			generatedProblems: isChatRecoveryAttempt(previousRequest, chatResponse(metadataWithChangedFile(changedDocument.uri)), chatRequest({ attempt: 1, editedRequestId: 'request-id' }), diagnosticSignals),
-			mergeConflicts: isChatRecoveryAttempt(previousRequest, chatResponse(metadataWithChangedFile(conflictDocument.uri)), chatRequest({ attempt: 1 }), conflictSignals),
+			userRejected: getChatRecoveryAttemptScore(previousRequest, chatResponse(metadataWithChangedFile(changedDocument.uri)), chatRequest({ attempt: 1, editedFileEvents: [{ uri: changedDocument.uri, eventKind: ChatRequestEditedFileEventKind.Undo }] }), noWorkspaceSignals),
+			userModified: getChatRecoveryAttemptScore(previousRequest, chatResponse(metadataWithChangedFile(changedDocument.uri)), chatRequest({ attempt: 1, editedRequestId: 'request-id', editedFileEvents: [{ uri: changedDocument.uri, eventKind: ChatRequestEditedFileEventKind.UserModification }] }), noWorkspaceSignals),
+			generatedProblems: getChatRecoveryAttemptScore(previousRequest, chatResponse(metadataWithChangedFile(changedDocument.uri)), chatRequest({ attempt: 1, editedRequestId: 'request-id' }), diagnosticSignals),
+			mergeConflicts: getChatRecoveryAttemptScore(previousRequest, chatResponse(metadataWithChangedFile(conflictDocument.uri)), chatRequest({ attempt: 1 }), conflictSignals),
 		}).toEqual({
 			userRejected: true,
 			userModified: true,

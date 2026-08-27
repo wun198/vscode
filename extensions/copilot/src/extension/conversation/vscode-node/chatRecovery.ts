@@ -31,6 +31,7 @@ export enum ChatRecoverySignal {
 	RequestRetried = 'requestRetried',
 	RequestEdited = 'requestEdited',
 	RequestChangedModel = 'requestChangedModel',
+	RequestTurnedOffAutopilot = 'requestTurnedOffAutopilot',
 	PlanReviewRejected = 'planReviewRejected',
 }
 
@@ -45,8 +46,14 @@ const chatRecoverySignalRules = {
 	[ChatRecoverySignal.RequestRetried]: { weight: 0.25 },
 	[ChatRecoverySignal.RequestEdited]: { weight: 0.5 },
 	[ChatRecoverySignal.RequestChangedModel]: { weight: 0.25 },
+	[ChatRecoverySignal.RequestTurnedOffAutopilot]: { weight: 0.5 },
 	[ChatRecoverySignal.PlanReviewRejected]: { weight: 0.75 },
 } satisfies Record<ChatRecoverySignal, { readonly weight: number }>;
+
+export interface IChatRecoveryAttemptScore {
+	readonly signals: readonly ChatRecoverySignal[];
+	readonly score: number;
+}
 
 const chatRecoveryScoreThreshold = 1;
 
@@ -114,9 +121,9 @@ export function wasLastPlanReviewRejected(metadata: Partial<IResultMetadata> | u
 /**
  * Determines whether the current chat request is an attempt to recover from a previous failed request.
  */
-export function isChatRecoveryAttempt(previousRequest: ChatRequestTurn2 | undefined, previousResponse: ChatResponseTurn | undefined, request: vscode.ChatRequest, environment?: IChatRecoveryEnvironment): boolean {
+export function getChatRecoveryAttemptScore(previousRequest: ChatRequestTurn2 | undefined, previousResponse: ChatResponseTurn | undefined, request: vscode.ChatRequest, environment?: IChatRecoveryEnvironment): IChatRecoveryAttemptScore | undefined {
 	if ((!previousRequest && !previousResponse) || request.permissionLevel === 'autopilot' || request.subAgentInvocationId || request.isSystemInitiated) {
-		return false;
+		return undefined;
 	}
 
 	const signals: ChatRecoverySignal[] = [];
@@ -128,6 +135,9 @@ export function isChatRecoveryAttempt(previousRequest: ChatRequestTurn2 | undefi
 	}
 	if (previousRequest?.modelId && previousRequest.modelId !== request.model.id) {
 		signals.push(ChatRecoverySignal.RequestChangedModel);
+	}
+	if (previousRequest?.permissionLevel === 'autopilot' && request.permissionLevel !== 'autopilot') {
+		signals.push(ChatRecoverySignal.RequestTurnedOffAutopilot);
 	}
 	if (previousRequest && arePromptsSimilar(previousRequest.prompt, request.prompt)) {
 		signals.push(ChatRecoverySignal.LastRequestRepeated);
@@ -175,5 +185,8 @@ export function isChatRecoveryAttempt(previousRequest: ChatRequestTurn2 | undefi
 	}
 
 	const score = signals.reduce((total, signal) => total + chatRecoverySignalRules[signal].weight, 0);
-	return score >= chatRecoveryScoreThreshold;
+	return {
+		score,
+		signals,
+	};
 }
