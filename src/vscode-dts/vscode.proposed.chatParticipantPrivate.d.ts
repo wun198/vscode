@@ -57,6 +57,10 @@ declare module 'vscode' {
 		 * The attempt number of the request. The first request has attempt number 0.
 		 */
 		readonly attempt: number;
+		/**
+		 * The ID of the request that this request replaces after the user edited it.
+		 */
+		readonly editedRequestId?: string;
 
 		/**
 		 * The session identifier for this chat request.
@@ -240,9 +244,14 @@ declare module 'vscode' {
 		readonly modeInstructions2?: ChatRequestModeInstructions;
 
 		/**
+		 * The permission level that was active for this request, if any.
+		 */
+		readonly permissionLevel?: string;
+
+		/**
 		 * @hidden
 		 */
-		constructor(prompt: string, command: string | undefined, references: ChatPromptReference[], participant: string, toolReferences: ChatLanguageModelToolReference[], editedFileEvents: ChatRequestEditedFileEvent[] | undefined, id: string | undefined, modelId: string | undefined, modeInstructions2: ChatRequestModeInstructions | undefined);
+		constructor(prompt: string, command: string | undefined, references: ChatPromptReference[], participant: string, toolReferences: ChatLanguageModelToolReference[], editedFileEvents: ChatRequestEditedFileEvent[] | undefined, id: string | undefined, modelId: string | undefined, modeInstructions2: ChatRequestModeInstructions | undefined, permissionLevel: string | undefined);
 	}
 
 	export class ChatResponseTurn2 {
