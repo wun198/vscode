@@ -279,101 +279,18 @@ function Test-SourceHasGitHubAuthenticationSecret([string]$node, [string]$source
 	return $false
 }
 
-function Get-JsoncCodeMask([string]$text) {
-	# Returns a same-length copy of $text with every comment span blanked out.
-	# Offsets are preserved so a match found in the mask can be applied to the
-	# original. String contents are respected, so a `//` inside a value (a URL,
-	# say) is not mistaken for a comment.
-	$chars = $text.ToCharArray()
-	$masked = [char[]]::new($chars.Length)
-	[Array]::Copy($chars, $masked, $chars.Length)
+function Ensure-AutomationSettings([string]$node, [string]$userDataDir) {
+	# Both the JSONC merge and the discovery of *which* settings files matter live
+	# in `normalize-automation-settings.ts`, so `launch.sh` and `launch.ps1` share
+	# a single implementation and cannot drift.
+	New-Item -ItemType Directory -Force -Path (Join-Path $userDataDir 'User') | Out-Null
 
-	$inString = $false
-	$inLineComment = $false
-	$inBlockComment = $false
-	$escaped = $false
-
-	for ($i = 0; $i -lt $chars.Length; $i++) {
-		$current = $chars[$i]
-		$next = if ($i + 1 -lt $chars.Length) { $chars[$i + 1] } else { [char]0 }
-
-		if ($inLineComment) {
-			if ($current -eq "`n") { $inLineComment = $false } else { $masked[$i] = ' ' }
-			continue
-		}
-		if ($inBlockComment) {
-			if ($current -eq '*' -and $next -eq '/') {
-				$masked[$i] = ' '
-				$masked[$i + 1] = ' '
-				$i++
-				$inBlockComment = $false
-			} elseif ($current -ne "`n") {
-				$masked[$i] = ' '
-			}
-			continue
-		}
-		if ($inString) {
-			if ($escaped) { $escaped = $false }
-			elseif ($current -eq '\') { $escaped = $true }
-			elseif ($current -eq '"') { $inString = $false }
-			continue
-		}
-
-		if ($current -eq '"') { $inString = $true }
-		elseif ($current -eq '/' -and $next -eq '/') { $masked[$i] = ' '; $inLineComment = $true }
-		elseif ($current -eq '/' -and $next -eq '*') { $masked[$i] = ' '; $masked[$i + 1] = ' '; $i++; $inBlockComment = $true }
+	$normalize = Join-Path $PSScriptRoot 'normalize-automation-settings.ts'
+	$count = & $node $normalize '--user-data-dir' $userDataDir
+	if ($LASTEXITCODE -ne 0) {
+		throw "failed to normalize automation settings under $userDataDir"
 	}
-
-	return (-join $masked)
-}
-
-function Ensure-SimpleDialogSetting([string]$settingsFile) {
-	$key = 'files.simpleDialog.enable'
-	$settingsDirectory = Split-Path -Parent $settingsFile
-	New-Item -ItemType Directory -Force -Path $settingsDirectory | Out-Null
-
-	if (Test-Path -LiteralPath $settingsFile -PathType Leaf) {
-		$text = [IO.File]::ReadAllText($settingsFile)
-	} else {
-		$text = ''
-	}
-
-	if ([string]::IsNullOrWhiteSpace($text)) {
-		[IO.File]::WriteAllText($settingsFile, "{`n  `"$key`": true`n}`n", [Text.UTF8Encoding]::new($false))
-		return
-	}
-
-	# Match against a comment-masked copy so a commented-out occurrence such as
-	# `// "files.simpleDialog.enable": false` is not mistaken for the real
-	# setting. Offsets line up with the original, so the value is rewritten in
-	# place without disturbing comments.
-	$maskedText = Get-JsoncCodeMask $text
-	$keyPattern = [regex]::Escape($key)
-	$keyValueRegex = [regex]::new("(`"$keyPattern`"\s*:\s*)(true|false|null|`"[^`"`r`n]*`"|-?\d+(?:\.\d+)?)")
-	$keyMatch = $keyValueRegex.Match($maskedText)
-	if ($keyMatch.Success) {
-		$valueGroup = $keyMatch.Groups[2]
-		$updated = $text.Substring(0, $valueGroup.Index) + 'true' + $text.Substring($valueGroup.Index + $valueGroup.Length)
-		[IO.File]::WriteAllText($settingsFile, $updated, [Text.UTF8Encoding]::new($false))
-		return
-	}
-
-	$lastBrace = $maskedText.LastIndexOf('}')
-	if ($lastBrace -eq -1) {
-		throw "settings.json has no closing brace - refusing to clobber it: $settingsFile"
-	}
-	$firstBrace = $maskedText.IndexOf('{')
-	if ($firstBrace -eq -1 -or $firstBrace -ge $lastBrace) {
-		throw "settings.json has no opening brace - refusing to clobber it: $settingsFile"
-	}
-
-	# Whether a leading comma is needed depends only on real content, so decide
-	# it from the masked copy too.
-	$between = $maskedText.Substring($firstBrace + 1, $lastBrace - $firstBrace - 1).Trim()
-	$separator = if ($between.Length -eq 0 -or $between.EndsWith(',')) { '' } else { ',' }
-	$insertion = "$separator`n  `"$key`": true`n"
-	$updated = $text.Substring(0, $lastBrace) + $insertion + $text.Substring($lastBrace)
-	[IO.File]::WriteAllText($settingsFile, $updated, [Text.UTF8Encoding]::new($false))
+	return $count
 }
 
 function Write-LogTail([string]$logFile) {
@@ -519,6 +436,15 @@ try {
 	$sourceUserDataDir = [IO.Path]::GetFullPath($sourceUserDataDir)
 
 	$node = Get-UsableNode $repo
+	# Workspace settings override the cloned profile. Reject a forwarded folder or
+	# .code-workspace that would make Open Folder use an undriveable native dialog.
+	$normalize = Join-Path $PSScriptRoot 'normalize-automation-settings.ts'
+	$workspaceArgs = @($extraArgs)
+	& $node $normalize '--check-workspace-args' @workspaceArgs
+	if ($LASTEXITCODE -ne 0) {
+		throw 'forwarded workspace settings disable files.simpleDialog.enable'
+	}
+
 	Write-LaunchError "[launch.ps1] using Node: $node"
 	$ports = Get-FreePorts
 	$cdpPort = $ports[0]
@@ -573,9 +499,8 @@ try {
 		Copy-ProfileDirectory $sourceExtensions $extensionsDir $false
 	}
 
-	$settingsFile = Join-Path $destinationUdd 'User\settings.json'
-	Ensure-SimpleDialogSetting $settingsFile
-	Write-LaunchError "[launch.ps1] ensured files.simpleDialog.enable=true in $settingsFile"
+	$settingsCount = Ensure-AutomationSettings $node $destinationUdd
+	Write-LaunchError "[launch.ps1] ensured files.simpleDialog.enable=true and editor.editContext=true in $settingsCount profile settings file(s)"
 	$profileReadyMs = $launchStopwatch.ElapsedMilliseconds
 
 	$launchArgs = [System.Collections.Generic.List[string]]::new()
@@ -595,6 +520,18 @@ try {
 	foreach ($argument in $extraArgs) {
 		$launchArgs.Add($argument)
 	}
+	# --new-window: without an explicit path VS Code otherwise restores the previous
+	# workspace from cloned application state, which can override the simple dialog.
+	#
+	# --sync=off: the cloned profile keeps application storage, which is where
+	# settings-sync enablement lives, so a source profile with sync on would
+	# treat this run's automation-only overrides as local edits and upload them
+	# to the user's real synced settings. Forcing it off keeps it throwaway.
+	#
+	# Added *after* $extraArgs deliberately: for string options VS Code keeps
+	# the last occurrence, so a forwarded `--sync=on` would otherwise win.
+	$launchArgs.Add('--new-window')
+	$launchArgs.Add('--sync=off')
 
 	Write-LaunchError "[launch.ps1] launching: $codeBat $($launchArgs -join ' ')"
 	Write-LaunchError "[launch.ps1] logs: $logFile"

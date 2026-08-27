@@ -1,6 +1,6 @@
 ---
 name: launch
-description: "Launch Code OSS (VS Code from sources) into an isolated throwaway profile with unique debug ports so you can drive it with @playwright/cli AND attach a Node debugger via dap-cli in the same session. Use when working on VS Code itself and you want to interact with the running workbench, automate chat or UI flows, test UI features, take screenshots, set breakpoints in the renderer / extension host / main process, or combine UI driving with debugging."
+description: "Launch Code OSS (VS Code from sources) into an isolated throwaway profile with unique debug ports so you can drive it with the repo's own UI automation library or @playwright/cli AND attach a Node debugger via dap-cli in the same session. Use when working on VS Code itself and you want to interact with the running workbench, automate chat or UI flows, test UI features, take screenshots, set breakpoints in the renderer / extension host / main process, or combine UI driving with debugging."
 ---
 
 # Code OSS Dev - Launch + Debug
@@ -8,7 +8,7 @@ description: "Launch Code OSS (VS Code from sources) into an isolated throwaway 
 You're working on VS Code itself and you want to:
 
 1. Launch a Code OSS build from sources that is **already signed in** (Copilot, GitHub, etc.) so chat / agent flows work end-to-end.
-2. Drive it with `@playwright/cli` over CDP (UI automation).
+2. Drive it over CDP with the repo's own automation page objects (`test/automation`) or with `@playwright/cli`.
 3. Optionally attach a debugger via **dap-cli** to set breakpoints in the renderer, extension host, or main process.
 4. Run multiple instances at once without port conflicts.
 
@@ -35,7 +35,9 @@ The clone is **slim**: workspace storage, browser caches, file history, cached V
 
 > The launcher **copies** the source profile to a temp dir and never mutates the original. Each launch gets its own isolated `--user-data-dir` and `--extensions-dir`.
 
-> The launcher always sets `files.simpleDialog.enable: true` in the launched profile's `User/settings.json`. This is required for automation: VS Code's native OS file dialogs cannot be driven via `@playwright/cli` over CDP and are completely unreachable over SSH on headless macOS. The simple (quick-input) dialog can be navigated with `press` and clipboard paste. The override is per-launch and only affects throwaway profiles.
+> The launcher normalizes two settings in the launched profile's `User/settings.json`. `files.simpleDialog.enable: true` is required because VS Code's native OS file dialogs cannot be driven via `@playwright/cli` over CDP and are unreachable over SSH on headless macOS; the simple (quick-input) dialog can be navigated with `press` and clipboard paste. `editor.editContext: true` is required because `test/automation`'s page objects choose between `.native-edit-context` and `textarea` from `Code.editContextEnabled`, which is unconditionally true for a dev build — a profile that disabled the setting renders a `textarea` and every text-input helper waits on the wrong selector and times out. Language-specific overrides (a `"[typescript]"` block) are normalized too, since `editor.*` settings are `LANGUAGE_OVERRIDABLE` and would otherwise outrank the root value. Both overrides are per-launch and only affect throwaway profiles, and the launcher passes `--sync=off` so they can never reach the user's synced settings. The rewrite is user-scope only, so a workspace that sets `editor.editContext: false` in its own `.vscode/settings.json` still wins. `attach()` checks the editors the window restored and says so when it finds the mismatch, which turns the usual case into an actionable error instead of a 20s timeout - but a window that restores no editor has nothing to inspect, so if a text-input helper still times out, check the workspace and folder settings for that key.
+> A forwarded folder or `.code-workspace` that overrides `files.simpleDialog.enable` is rejected before launch; workspace scope wins over the throwaway profile and would otherwise reopen an undriveable native dialog. Forwarded `--profile`, `--profile-temp`, `--transient`, launcher-owned path/debug options, and a second `--` delimiter are also rejected because they would run outside the prepared profile or hide its safety flags.
+> A launch with no workspace path opens an empty window instead of restoring the source profile's last workspace, whose settings could override the automation profile.
 
 > For unattended automation, pass `--disable-workspace-trust` so a trust dialog cannot block the flow or extension-host startup. The override is process-scoped and does not modify the source profile. Only use it with content you trust.
 
@@ -143,7 +145,7 @@ $ext = $info.extHostPort
 $main = $info.mainPort
 $agent = $info.agentHostPort
 $log = $info.logFile
-$pid = $info.pid
+$codePid = $info.pid   # not `$pid`: that is PowerShell's own read-only PID
 ```
 
 ### What each port is for
@@ -155,7 +157,56 @@ $pid = $info.pid
 | `mainPort` (`--inspect`) | Electron main process (Node) | `dap-cli` (Node inspector protocol) |
 | `agentHostPort` (`--inspect-agenthost`) | Agent host process (Node) | `dap-cli` (Node inspector protocol) |
 
-## Drive the UI with @playwright/cli
+## Drive the UI
+
+**Start here: [use the repo's own automation library](./automation-library.md)**
+— the page objects the smoke tests use, with the retry and verification logic
+each surface needs. It requires the smoke-test driver, so pass the flag **at
+launch time** — it cannot be added to an already-running instance:
+
+```bash
+INFO=$("$LAUNCH" -- --enable-smoke-test-driver | tail -n1)
+CDP=$(jq -r .cdpPort <<<"$INFO")
+node /tmp/drive.ts "$CDP"          # the script below
+```
+
+```js
+// /tmp/drive.ts - run from the repo root; Node executes the .ts directly,
+// no build step. Takes the cdpPort as its first argument.
+import { attach } from '<dir-of-this-SKILL.md>/scripts/attach.ts';
+
+const session = await attach(process.argv[2], { window: 'workbench' });
+await session.workbench.quickaccess.runCommand('workbench.action.chat.open');
+await session.workbench.chat.waitForChatView();
+await session.workbench.chat.sendMessage('Reply with exactly PONG.');
+console.log(await session.workbench.chat.waitForResponseText(/PONG/i));
+await session.detach();
+```
+
+**Check for a page object before hand-rolling selectors.** `workbench.*` covers
+`chat`, `agentsWindow`, `quickaccess`, `quickinput`, `editors`, `explorer`,
+`search`, `terminal`, `notebook`, `settingsEditor`, `debug`, `scm`, `extensions`,
+`statusbar`, `problems`, `task`, `localization`, `activitybar`, `editor`,
+`keybindingsEditor` — each with the retries that surface needs. If your task
+names one of those surfaces, `ls test/automation/out/*.d.ts` and read its API
+first, then reach it through `attach()` above — **not** `new Application(...)`,
+which spawns a second Electron and will not talk to your running window, and not
+`ts-node`, since `node` runs these `.ts` files directly. Skipping this step is
+the single most expensive mistake with this skill:
+in a user study, finding an extension's publisher took **7m40s and 40 raw CLI
+calls** hand-rolling DOM queries, when
+`workbench.extensions.searchForExtension('ms-toolsai.datawrangler')` already did
+it. Read the signature before deciding a page object does not fit: that one
+takes an extension **id**, and passing the display name fails with
+`Extension ... is not found`, which reads like the surface is unsupported.
+
+**Then read [automation-library.md](./automation-library.md)** — window choice,
+controls with no page object, the integrated browser, and the gotchas (several
+cost multiple runs to discover). Fall back to raw `@playwright/cli` below for
+exploration (`snapshot`), screenshots, and anything the library misses;
+`session.page` is a normal Playwright `Page`.
+
+### Raw `@playwright/cli`
 
 Use the dynamic `cdpPort` from the launch JSON. The normal loop is: attach, confirm the target, snapshot, interact, then re-snapshot after meaningful UI changes.
 
@@ -225,7 +276,10 @@ before retrying.
 
 ### Typing into Monaco (chat input, editors)
 
-`fill` and `type` **silently fail** on Code OSS — Monaco's `native-edit-context` element doesn't react to Playwright's default input pipeline. Use one of these alternatives:
+`fill` **silently fails** on Code OSS — it sets a value directly, and Monaco's
+`native-edit-context` element only reacts to real input events. `page.keyboard.type()`
+*does* work (it dispatches genuine per-key events), but it is one round-trip per
+character, so prefer it only for short strings. For anything longer use:
 
 - **`scripts/monaco-paste.sh` helper** (recommended — fast, no system clipboard, parallel-safe). Reads text from a positional arg or stdin and dispatches a `ClipboardEvent('paste')` with a `DataTransfer` payload into the focused chat-input Monaco editor. Honors `--session NAME` or `$PW_SESSION` env so it stays inside the same `-s=` session as everything else.
 
@@ -257,7 +311,7 @@ before retrying.
   The helper prints a single JSON line on stdout: `{ok, actualLength, expectedLength, viewLineCount, firstViewLine, error?}`. Exit 0 on success, 1 on verify failure, 2 on argument errors. Tested reliable across 20+ sequential pastes including unicode (中文), emoji (🎉), backticks, ampersands, embedded quotes, and newlines.
 
   **Why a helper script and not just docs:** the inline recipe involves a multi-line `node -e` heredoc with embedded JS template literals, which is exactly the kind of code that gets miscopied. There are also three non-obvious correctness traps the helper handles internally:
-  1. Monaco's `native-edit-context` doesn't react to `fill` or `type`, only to actual paste events (or per-key `press`).
+  1. Monaco's `native-edit-context` ignores `fill` entirely; it only reacts to real input — paste events, per-key `press`, or `keyboard.type`.
   2. Monaco renders ASCII spaces as U+00A0 (NBSP) in the view-line DOM, so verification has to normalize before comparing.
   3. Monaco updates its DOM **asynchronously** after a paste event — a synchronous read-back inside the same `eval` returns stale state. The helper polls rendered view lines across paint cycles until the pasted prefix appears or verification times out.
 
@@ -423,12 +477,165 @@ npx @playwright/cli -s=$PW_SESSION close
 kill "$PID" 2>/dev/null || true
 # Or by port if you've lost the pid:
 pids=$(lsof -t -i :$CDP); [ -n "$pids" ] && kill $pids
-
-# Remove the throwaway profile
-rm -rf "$(dirname "$LOG")"
 ```
 
-Code OSS is a full Electron app and easily eats 1-4 GB. Always clean up.
+Code OSS is a full Electron app and easily eats 1-4 GB. Always clean up — but
+**do not delete the profile yet**: removing it before the check below throws away
+the logs of anything that survived the kill. The next section is the sequence to
+actually finish with.
+
+### Verify the cleanup actually worked
+
+**Do not treat a completed `kill` as proof the instance is gone.** `$PID` is the
+`code.sh` wrapper, and killing it does not reliably reap the Electron process
+group it spawned; helper processes are frequently re-parented and survive. In a
+run of seven subagent sessions, every one reported that it had cleaned up, yet
+nine instances (13.7 GB RSS) and 341 MB of temp profiles were still alive
+afterwards.
+
+Always finish with an explicit check, and only then remove the profile:
+
+```bash
+kill "$PID" 2>/dev/null || true
+sleep 3
+
+# Anything still alive for THIS run? (match on the runDir, so other agents'
+# concurrent instances are left untouched)
+RUN_DIR=$(jq -r '.runDir // empty' <<<"$INFO")
+
+# pgrep is what makes this check meaningful. Without it the lookups below fail
+# with status 127, which is indistinguishable from "nothing matched", and the
+# profile would be deleted without ever verifying the processes exited.
+command -v pgrep >/dev/null || { echo "pgrep not found; cannot verify cleanup" >&2; return 2>/dev/null || exit 1; }
+
+# Fail closed: an empty or malformed RUN_DIR would turn the pgrep below into a
+# match-everything pattern (`pgrep -f ""` matches every process on Linux), and
+# the kill that follows would hit unrelated processes. Canonicalize first -
+# a glob matches `/` too, so `/tmp/code-oss-dev-x/../../home/you` would sail
+# through a pattern check and then reach `rm -rf`. Compare the resolved
+# basename instead, so only a real launcher run directory qualifies.
+RUN_DIR=$(cd "$RUN_DIR" 2>/dev/null && pwd -P) || {
+  echo "refusing to clean up: runDir does not exist" >&2; return 2>/dev/null || exit 1
+}
+# The basename alone does not prove ownership - a real directory such as
+# ~/code-oss-dev-important would pass it and then be handed to `rm -rf`. Also
+# require the canonical parent to be the launcher's own temp root: `$TMPDIR`,
+# or `/tmp` when launch.sh fell back to it because `$TMPDIR` was too long.
+run_parent=$(cd "$RUN_DIR/.." && pwd -P)
+tmp_root=$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P)
+plain_tmp=$(cd /tmp 2>/dev/null && pwd -P)
+case "$(basename "$RUN_DIR")" in
+  code-oss-dev-*) ;;
+  *) echo "refusing to clean up: bad runDir '$RUN_DIR'" >&2; return 2>/dev/null || exit 1 ;;
+esac
+if [ "$run_parent" != "$tmp_root" ] && [ "$run_parent" != "$plain_tmp" ]; then
+  echo "refusing to clean up: '$RUN_DIR' is not under the launcher temp root" >&2
+  return 2>/dev/null || exit 1
+fi
+
+# pgrep -f takes a regex, not a literal: an unescaped '+' or '[' from a custom
+# TMPDIR can miss this run (deleting a profile whose processes are still alive)
+# or broaden the match before the kill. Escape once, reuse everywhere.
+RUN_RE=$(printf '%s' "$RUN_DIR" | sed 's/[][\.^$*+?(){}|\\]/\\&/g')
+
+leftover=''
+if leftover=$(pgrep -f "$RUN_RE"); then
+  echo "$leftover" | xargs kill 2>/dev/null || true
+  sleep 2
+else
+  pgrep_status=$?
+  if [ "$pgrep_status" -gt 1 ]; then
+    echo "pgrep failed with status $pgrep_status; keeping $RUN_DIR for diagnosis" >&2
+    return 2>/dev/null || exit 1
+  fi
+fi
+
+# Only discard the profile once nothing is left: a survivor still has the run's
+# logs open, and deleting them removes the evidence you need to diagnose it.
+if leftover=$(pgrep -f "$RUN_RE"); then
+  echo "STILL RUNNING: $(printf '%s' "$leftover" | tr '\n' ' ')"
+  echo "keeping $RUN_DIR for diagnosis"
+else
+  pgrep_status=$?
+  if [ "$pgrep_status" -eq 1 ]; then
+    rm -rf "$RUN_DIR"
+  else
+    echo "pgrep failed with status $pgrep_status; keeping $RUN_DIR for diagnosis" >&2
+    return 2>/dev/null || exit 1
+  fi
+fi
+```
+
+On Windows, where neither Bash nor `pgrep` is available:
+
+```powershell
+Stop-Process -Id $codePid -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+
+# Resolve first: only a real launcher run directory may be removed. The Windows
+# launcher names it `<temp>\code-oss-dev\<timestamp-pid>`, so the check is that
+# it is a direct child of that base - the leaf is a timestamp, not a prefix.
+$resolved = Resolve-Path -LiteralPath $info.runDir -ErrorAction SilentlyContinue
+$runDir = if ($resolved) { $resolved.ProviderPath } else { $null }
+$base = (Resolve-Path -LiteralPath (Join-Path $env:TEMP 'code-oss-dev') -ErrorAction SilentlyContinue)
+$leaf = if ($runDir) { Split-Path -Leaf $runDir } else { '' }
+if (-not $runDir -or -not $base -or (Split-Path -Parent $runDir) -ne $base.ProviderPath -or $leaf -notmatch '^\d{8}-\d{6}-\d+$') {
+	throw "refusing to clean up: bad runDir '$($info.runDir)'"
+}
+
+# Match on the command line, so other agents' concurrent instances are left
+# alone. Compare literally rather than with `-like`: a temp path containing
+# `[` or `]` would be read as a wildcard character class, which can miss this
+# instance (deleting a live profile) or match unrelated processes.
+$needle = $runDir.ToLowerInvariant()
+$survivors = { Get-CimInstance Win32_Process -ErrorAction Stop |
+	Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($needle) } }
+
+try {
+	$running = @(& $survivors)
+} catch {
+	throw "process enumeration failed; keeping $runDir for diagnosis: $($_.Exception.Message)"
+}
+$running | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 2
+
+# Only discard the profile once nothing is left: a survivor still holds the
+# run's logs open, and deleting them removes the evidence you need.
+try {
+	$left = @(& $survivors)
+} catch {
+	throw "process enumeration failed; keeping $runDir for diagnosis: $($_.Exception.Message)"
+}
+if ($left) {
+	Write-Host "STILL RUNNING: $($left.ProcessId -join ' ')"
+	Write-Host "keeping $runDir for diagnosis"
+} else {
+	Remove-Item -LiteralPath $runDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+```
+
+To audit the whole machine after a batch of runs — total resident memory and
+leaked profiles across every launch:
+
+```bash
+# Match the launcher's run-dir argument, so this works on Linux too rather than
+# only matching the macOS app-bundle path.
+ps aux | grep "[c]ode-oss-dev-" | awk '{s+=$6} END {printf "Code OSS RSS: %.1f GB\n", s/1024/1024}'
+# Profiles live under the launcher's temp base, or /tmp when that base was too
+# long for unix sockets. Canonicalize first so an unset TMPDIR (or one resolving
+# to /tmp) does not count every profile twice.
+tmp_root=$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P)
+plain_tmp=$(cd /tmp 2>/dev/null && pwd -P)
+if [ "$tmp_root" = "$plain_tmp" ]; then
+  du -shc "$tmp_root"/code-oss-dev-* 2>/dev/null
+else
+  du -shc "$tmp_root"/code-oss-dev-* "$plain_tmp"/code-oss-dev-* 2>/dev/null
+fi | tail -1
+```
+
+Both should be empty/zero once every instance you own has exited. If you are
+running concurrently with other agents, scope by `runDir` rather than killing
+every `Code - OSS` process, and prune only your own `/tmp/code-oss-dev-*` dirs.
 
 ## Troubleshooting
 

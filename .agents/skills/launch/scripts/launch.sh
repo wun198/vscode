@@ -72,11 +72,19 @@ if [[ -z "$REPO" ]]; then
 		exit 2
 	fi
 fi
+NORMALIZE_SETTINGS="$(cd "$(dirname "$0")" && pwd)/normalize-automation-settings.ts"
 
 if [[ ! -d "$SOURCE_UDD" ]]; then
 	echo "Source user-data-dir does not exist: $SOURCE_UDD" >&2
 	echo "Pass --source-user-data-dir <path> or set CODE_OSS_DEV_AUTHED_USER_DATA_DIR." >&2
 	exit 2
+fi
+
+# A workspace value wins over the cloned profile's user setting. Refuse a
+# forwarded folder or .code-workspace that disables the simple dialog, or Open
+# Folder would still launch a native OS dialog that CDP cannot drive.
+if ! node "$NORMALIZE_SETTINGS" --check-workspace-args "${EXTRA_ARGS[@]}"; then
+	exit 1
 fi
 
 PORTS=$(node <<'NODE'
@@ -159,77 +167,33 @@ if [[ "$FULL" != "1" && "$CLONE_EXTENSIONS" == "1" ]]; then
 	rsync -a "$SOURCE_UDD/extensions/" "$EXT_DIR/"
 fi
 
-# Force the simple (quick-input) file dialog so automation can drive
-# "Open Folder" / workspace pickers. The native OS file dialog cannot be
-# controlled by @playwright/cli over CDP (and is completely unreachable
-# over SSH on headless macOS). The setting overlay is per-launch and
-# always applied because every launched instance under this skill is
-# a throwaway used for automation.
-SETTINGS_FILE="$DEST_UDD/User/settings.json"
-mkdir -p "$(dirname "$SETTINGS_FILE")"
-# Data-preserving text-based merge: insert/update `files.simpleDialog.enable`
-# without reparsing the whole file. Avoids dropping user comments and
-# string values containing `//` (e.g. URLs). Fails loudly if the file
-# exists but has no recognizable JSON object shape — never silently
-# overwrites with `{}`.
-if ! node - "$SETTINGS_FILE" <<'NODE'
-const fs = require('fs');
-const f = process.argv[2];
-const KEY = 'files.simpleDialog.enable';
+# Normalize the settings that automation depends on. Both overlays are
+# per-launch and always applied, because every instance launched under this
+# skill is a throwaway used for automation.
+#
+#   files.simpleDialog.enable  Forces the simple (quick-input) file dialog so
+#     automation can drive "Open Folder" / workspace pickers. The native OS
+#     file dialog cannot be controlled by @playwright/cli over CDP (and is
+#     completely unreachable over SSH on headless macOS).
+#
+#   editor.editContext  Forces the EditContext input mode. test/automation's
+#     page objects choose between `.native-edit-context` and `textarea` from
+#     `Code.editContextEnabled`, which is derived from quality/version and is
+#     unconditionally true for a dev build. If the cloned profile disabled
+#     this setting, Monaco renders a `textarea`, the page objects still wait
+#     for `.native-edit-context`, and every text-input helper (Chat,
+#     Extensions, Editors, AgentsWindow, ...) times out.
+mkdir -p "$DEST_UDD/User"
 
-let text;
-try { text = fs.readFileSync(f, 'utf8'); }
-catch (e) {
-	if (e.code === 'ENOENT') text = '';
-	else { console.error('[launch.sh] cannot read ' + f + ': ' + e.message); process.exit(1); }
-}
-
-// Empty file → write a fresh object.
-if (text.trim() === '') {
-	fs.writeFileSync(f, '{\n  "' + KEY + '": true\n}\n');
-	process.exit(0);
-}
-
-// Key already present (with any value) → update its value to `true`
-// via a targeted regex on the value slot only.
-const keyValueRe = new RegExp('("' + KEY.replace(/\./g, '\\.') + '"\\s*:\\s*)(true|false|null|"[^"\\n]*"|-?\\d+(?:\\.\\d+)?)', 'g');
-if (keyValueRe.test(text)) {
-	const updated = text.replace(keyValueRe, '$1true');
-	fs.writeFileSync(f, updated);
-	process.exit(0);
-}
-
-// Otherwise: find the LAST `}` and insert the new key before it.
-// We deliberately don't parse JSONC — this preserves comments and
-// any other content the source profile had.
-const lastBrace = text.lastIndexOf('}');
-if (lastBrace === -1) {
-	console.error('[launch.sh] settings.json has no closing brace — refusing to clobber it: ' + f);
-	process.exit(1);
-}
-
-// Decide whether to add a leading comma. If the only thing between the
-// first `{` and the last `}` is whitespace and comments, the object is
-// empty for our purposes and no comma is needed.
-const firstBrace = text.indexOf('{');
-if (firstBrace === -1 || firstBrace >= lastBrace) {
-	console.error('[launch.sh] settings.json has no opening brace — refusing to clobber it: ' + f);
-	process.exit(1);
-}
-const between = text.slice(firstBrace + 1, lastBrace)
-	.replace(/\/\*[\s\S]*?\*\//g, '')
-	.replace(/\/\/[^\n]*/g, '')
-	.trim();
-const separator = between.length === 0 || between.endsWith(',') ? '' : ',';
-const insertion = separator + '\n  "' + KEY + '": true\n';
-
-fs.writeFileSync(f, text.slice(0, lastBrace) + insertion + text.slice(lastBrace));
-NODE
-then
-	echo "[launch.sh] failed to ensure files.simpleDialog.enable=true in $SETTINGS_FILE — automation may need to fall back to per-key input" >&2
+# Discovery lives in the shared script, so both launchers normalize exactly the
+# same set of files: the default profile plus every named profile that has its
+# own settings.json. That matters because the clone preserves workspace/profile
+# associations, and an associated workspace opens with its named profile.
+if ! SETTINGS_COUNT=$(node "$NORMALIZE_SETTINGS" --user-data-dir "$DEST_UDD"); then
+	echo "[launch.sh] failed to normalize automation settings under $DEST_UDD — automation may need to fall back to per-key input" >&2
 	exit 1
 fi
-echo "[launch.sh] ensured files.simpleDialog.enable=true in $SETTINGS_FILE" >&2
+echo "[launch.sh] ensured files.simpleDialog.enable=true and editor.editContext=true in $SETTINGS_COUNT profile settings file(s)" >&2
 PROFILE_READY_MS=$(monotonic_ms)
 
 # Strip ELECTRON_RUN_AS_NODE, commonly inherited from VS Code's integrated
@@ -260,6 +224,18 @@ fi
 if (( ${#EXTRA_ARGS[@]} )); then
 	ARGS+=("${EXTRA_ARGS[@]}")
 fi
+# --new-window: without an explicit path VS Code otherwise restores the previous
+# workspace from cloned application state. That workspace can override the simple
+# dialog setting, so force an empty window instead.
+#
+# --sync=off: the cloned profile keeps application storage, which is where
+# settings-sync enablement lives, so a source profile with sync on would treat
+# this run's automation-only overrides as local edits and upload them to the
+# user's real synced settings. Forcing it off keeps the profile throwaway.
+#
+# Appended *after* EXTRA_ARGS deliberately: for string options VS Code keeps the
+# last occurrence, so a forwarded `-- --sync=on` would otherwise win.
+ARGS+=("--new-window" "--sync=off")
 
 LOG_FILE="$RUN_DIR/code.log"
 echo "[launch.sh] launching: $CODE_SH ${ARGS[*]}" >&2
